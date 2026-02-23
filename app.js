@@ -96,23 +96,60 @@ function parseToForm(text) {
   if (!parsed.pace && !(parsed.distance && parsed.duration)) warn.push('페이스 추출/계산 실패');
   if (!parsed.avgHr) warn.push('평균심박 추출 실패');
   if (!parsed.calories) warn.push('칼로리 추출 실패');
+  if (parsed.distanceCorrectionNote) warn.push(parsed.distanceCorrectionNote);
+  if (parsed.durationNote) warn.push(parsed.durationNote);
   els.parseWarnings.innerHTML = warn.map(w => `<div>⚠️ ${w}</div>`).join('');
   showMsg('OCR 파싱 결과를 폼에 반영했습니다.');
 }
 
 function parseOCRText(text) {
   const normalized = text.replace(/,/g, '.');
-  const distance = matchNumber(normalized, /(\d+(?:\.\d+)?)\s*km/i);
-  const duration = matchDuration(normalized);
+  const distanceResult = matchDistance(normalized);
+  const durationResult = matchDuration(normalized);
   const pace = matchPace(normalized);
-  const avgHr = matchNumber(normalized, /(?:avg\s*hr|average\s*heart\s*rate|심박|평균\s*심박)[^\d]{0,10}(\d{2,3})|\b(\d{2,3})\s*bpm/i);
-  const calories = matchNumber(normalized, /(\d{2,5})\s*kcal/i);
-  return { distance, duration, pace, avgHr, calories };
+  const avgHr = matchHeartRate(normalized);
+  const calories = matchCalories(normalized);
+  return {
+    distance: distanceResult.value,
+    duration: durationResult.value,
+    pace,
+    avgHr,
+    calories,
+    distanceCorrectionNote: distanceResult.note,
+    durationNote: durationResult.note,
+  };
 }
 
 function matchDuration(text) {
-  const m = text.match(/\b((?:\d{1,2}:)?\d{1,2}:\d{2})\b/);
-  return m ? m[1] : null;
+  const lines = text.split(/\n+/).filter(Boolean);
+  const candidates = [];
+  const durationPattern = /\b((?:\d{1,2}:)?\d{1,2}:\d{2})\b/g;
+  const preferredContext = /(총\s*시간|duration|시간|소요)/i;
+
+  lines.forEach((line, lineIdx) => {
+    let m;
+    while ((m = durationPattern.exec(line)) !== null) {
+      const value = m[1];
+      const sec = durationToSec(value);
+      if (!sec) continue;
+      let score = 0;
+      if (preferredContext.test(line)) score += 12;
+      if (/^2[0-3]:\d{2}$/.test(value)) score -= 8; // phone clock likely
+      if (sec > 0 && sec <= 60 * 60 * 6) score += 3;
+      if (/^\d{1,2}:\d{2}$/.test(value)) score += 1;
+      score += Math.max(0, 3 - lineIdx * 0.3);
+      candidates.push({ value, score });
+    }
+  });
+
+  if (!candidates.length) return { value: null, note: null };
+  candidates.sort((a, b) => b.score - a.score);
+  const top = candidates[0];
+  const pickedClockLike = /^2[0-3]:\d{2}$/.test(top.value);
+  return {
+    value: top.value,
+    note: pickedClockLike ? '시간 후보가 폰 시각으로 보일 수 있어 확인 필요' : null,
+  };
 }
 
 function matchPace(text) {
@@ -127,6 +164,63 @@ function matchNumber(text, regex) {
   if (!m) return null;
   const candidate = m.slice(1).find(Boolean);
   return candidate ? Number(candidate) : null;
+}
+
+function matchDistance(text) {
+  const m = text.match(/(\d+(?:\.\d+)?)\s*km/i);
+  if (!m) return { value: null, note: null };
+  const raw = m[1];
+  const numeric = Number(raw);
+  if (!Number.isFinite(numeric)) return { value: null, note: null };
+  if (numeric < 30) return { value: numeric, note: null };
+
+  const compact = raw.replace(/\D/g, '');
+  if (!compact) return { value: numeric, note: '거리 값이 비정상적으로 큼(30km 이상) - 확인 필요' };
+
+  const candidates = [];
+  if (compact.length >= 2) {
+    candidates.push(Number(`${compact.slice(0, -2)}.${compact.slice(-2)}`));
+    candidates.push(Number(`${compact.slice(0, -1)}.${compact.slice(-1)}`));
+  }
+
+  const valid = candidates.filter(v => Number.isFinite(v) && v > 0 && v < 30);
+  if (valid.length) {
+    const chosen = valid[0];
+    return {
+      value: chosen,
+      note: `거리 ${numeric}km를 ${chosen}km로 자동 보정(소수점 누락 추정)`,
+    };
+  }
+
+  return { value: numeric, note: '거리 값이 비정상적으로 큼(30km 이상) - 확인 필요' };
+}
+
+function matchHeartRate(text) {
+  const strict = matchNumber(text, /(?:avg\s*hr|average\s*heart\s*rate|심박|평균\s*심박)[^\d]{0,10}(\d{2,3})|\b(\d{2,3})\s*bpm/i);
+  if (strict) return strict;
+
+  const lines = text.split(/\n+/);
+  for (const line of lines) {
+    if (/(심박|heart|hr|hb|bmp|bpm|맥박)/i.test(line)) {
+      const m = line.match(/(\d{2,3})/);
+      if (m) return Number(m[1]);
+    }
+  }
+  return null;
+}
+
+function matchCalories(text) {
+  const strict = matchNumber(text, /(\d{2,5})\s*kcal/i);
+  if (strict) return strict;
+
+  const lines = text.split(/\n+/);
+  for (const line of lines) {
+    if (/(칼로리|cal|kca[l1i]?|카로리)/i.test(line)) {
+      const m = line.match(/(\d{2,5})/);
+      if (m) return Number(m[1]);
+    }
+  }
+  return null;
 }
 
 function saveEntry(e) {
