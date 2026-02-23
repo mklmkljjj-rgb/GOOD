@@ -1,0 +1,80 @@
+:root {
+  --bg: #0f172a;
+  --card: #1e293b;
+  --text: #e2e8f0;
+  --muted: #94a3b8;
+  --accent: #38bdf8;
+  --danger: #f87171;
+  --ok: #4ade80;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.4;
+}
+header, main { max-width: 1100px; margin: 0 auto; padding: 1rem; }
+h1 { margin-bottom: 0.25rem; }
+.card {
+  background: var(--card);
+  border-radius: 10px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+.muted { color: var(--muted); }
+.highlight { background: rgba(56,189,248,0.15); padding: 0.75rem; border-radius: 8px; margin-bottom: 0.75rem; }
+.summary-grid, .form-grid, .stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.75rem;
+}
+.summary-grid div, .stat-card {
+  background: rgba(255,255,255,0.03);
+  padding: 0.65rem;
+  border-radius: 8px;
+}
+.summary-grid strong { display: block; color: var(--muted); }
+progress { width: 100%; height: 14px; }
+.block { margin-bottom: 1rem; }
+textarea, input, select, button {
+  width: 100%;
+  padding: 0.5rem;
+  border-radius: 6px;
+  border: 1px solid #334155;
+  background: #0b1220;
+  color: var(--text);
+}
+button { cursor: pointer; background: #1d4ed8; border: none; }
+button:hover { filter: brightness(1.1); }
+button.danger { background: #b91c1c; }
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+.toolbar > * { width: auto; }
+.inline { display: inline-flex; gap: 0.5rem; align-items: center; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th, td {
+  border-bottom: 1px solid #334155;
+  padding: 0.5rem;
+  text-align: left;
+  vertical-align: top;
+}
+.warning-list { color: var(--danger); min-height: 1.3rem; }
+.plan-list { display: grid; gap: 0.4rem; }
+.plan-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: rgba(255,255,255,0.03);
+  padding: 0.5rem;
+  border-radius: 6px;
+}
+.plan-item.done { outline: 1px solid var(--ok); }
+.manage-btns { display:flex; gap:0.3rem; }
+.small { font-size: 0.85rem; color: var(--muted); }

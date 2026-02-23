@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>러닝 일지 RPG 웹앱</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>러닝 일지 + Garmin OCR + RPG 성장</h1>
+    <p class="muted">서버 없이 브라우저에서 동작 · 데이터는 localStorage에 저장</p>
+  </header>
+
+  <main>
+    <section class="card" id="monthlySummary">
+      <h2>이번 달 요약</h2>
+      <div class="summary-grid">
+        <div><strong>총 거리</strong><span id="sumDistance">0 km</span></div>
+        <div><strong>총 시간</strong><span id="sumDuration">00:00:00</span></div>
+        <div><strong>평균 페이스</strong><span id="sumPace">-</span></div>
+        <div><strong>훈련 횟수</strong><span id="sumCount">0회</span></div>
+        <div><strong>레벨</strong><span id="sumLevel">Lv.1</span></div>
+        <div><strong>누적 EXP</strong><span id="sumExp">0</span></div>
+        <div><strong>30일 평균 페이스</strong><span id="sum30Pace">-</span></div>
+        <div><strong>30일 평균 심박</strong><span id="sum30Hr">-</span></div>
+      </div>
+      <div class="progress-wrap">
+        <label>레벨 진행도</label>
+        <progress id="levelProgress" max="100" value="0"></progress>
+        <small id="levelRemaining">다음 레벨까지 500 EXP</small>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>기록 추가</h2>
+      <div class="block">
+        <h3>1) Garmin 스크린샷 OCR</h3>
+        <input type="file" id="imageInput" accept="image/*" />
+        <button id="runOcrBtn" type="button">OCR 실행</button>
+        <div id="ocrStatus" class="muted">대기 중</div>
+        <progress id="ocrProgress" max="100" value="0"></progress>
+      </div>
+
+      <div class="block">
+        <h3>2) OCR 텍스트 확인/수정</h3>
+        <textarea id="ocrText" rows="6" placeholder="OCR 결과가 여기에 표시됩니다."></textarea>
+        <button id="reparseBtn" type="button">재파싱</button>
+        <div id="parseWarnings" class="warning-list"></div>
+      </div>
+
+      <div class="block">
+        <h3>3) 수동 입력</h3>
+        <form id="entryForm">
+          <div class="form-grid">
+            <label>날짜<input type="date" id="date" required /></label>
+            <label>거리 (km)<input type="number" step="0.01" id="distance" placeholder="예: 10.02" /></label>
+            <label>시간 (hh:mm:ss 또는 mm:ss)<input type="text" id="duration" placeholder="예: 45:12" /></label>
+            <label>평균 심박<input type="number" id="avgHr" placeholder="예: 152" /></label>
+            <label>칼로리<input type="number" id="calories" placeholder="예: 620" /></label>
+            <label>훈련유형
+              <select id="trainingType">
+                <option value="">자동 분류</option>
+                <option value="회복/존1">회복/존1</option>
+                <option value="존2">존2</option>
+                <option value="템포">템포</option>
+                <option value="인터벌">인터벌</option>
+              </select>
+            </label>
+          </div>
+          <label>메모<textarea id="memo" rows="2" placeholder="예: 인터벌 1km x 5"></textarea></label>
+          <button id="saveBtn" type="submit">4) 저장</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>기록 리스트</h2>
+      <div class="toolbar">
+        <label>정렬
+          <select id="sortSelect">
+            <option value="latest">최신순</option>
+            <option value="date">날짜</option>
+            <option value="distance">거리</option>
+            <option value="pace">페이스</option>
+            <option value="exp">EXP</option>
+          </select>
+        </label>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>날짜</th><th>거리</th><th>시간</th><th>페이스</th><th>평균심박</th><th>훈련유형</th><th>EXP</th><th>메모</th><th>관리</th>
+            </tr>
+          </thead>
+          <tbody id="entryTableBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>RPG 성장 영역</h2>
+      <div id="buildSummary" class="highlight">현재 빌드 분석 대기중</div>
+      <div id="statsContainer" class="stats-grid"></div>
+    </section>
+
+    <section class="card">
+      <h2>월간 훈련 계획 (퀘스트/보상 없음)</h2>
+      <p class="muted">기본 가정: 10km 45분 / 존2 페이스 7:00~7:30 / 주 5~6회 추천</p>
+      <div class="toolbar">
+        <button id="regenPlanBtn" type="button">이번 달 계획 재생성</button>
+      </div>
+      <div id="planList" class="plan-list"></div>
+    </section>
+
+    <section class="card">
+      <h2>데이터 관리</h2>
+      <div class="toolbar">
+        <button id="exportJsonBtn" type="button">JSON 내보내기</button>
+        <label class="inline">JSON 가져오기<input id="importJsonInput" type="file" accept="application/json" /></label>
+        <button id="exportCsvBtn" type="button">CSV 내보내기</button>
+        <button id="resetStorageBtn" type="button" class="danger">localStorage 초기화</button>
+      </div>
+      <div id="globalMessage" class="muted"></div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
