@@ -3,6 +3,7 @@ const defaultData = {
   entries: [],
   stats: { endurance: 0, speed: 0, recovery: 0, consistency: 0 },
   plan: [],
+  trainingPlan: null,
   totalExp: 0,
   updatedAt: new Date().toISOString()
 };
@@ -32,6 +33,9 @@ heart rate 161
 
 const OCR_CONFIG = {
   longEdgeTarget: 1900,
+  topNoiseRatio: 0.18,
+  topTabRatio: 0.32,
+  lowerRoiStart: 0.48
   topNoiseRatio: 0.12,
   topTabRatio: 0.28,
   lowerRoiStart: 0.4
@@ -53,11 +57,15 @@ const els = {
   calories: byId('calories'), memo: byId('memo'), trainingType: byId('trainingType'),
   sortSelect: byId('sortSelect'), entryTableBody: byId('entryTableBody'),
   buildSummary: byId('buildSummary'), statsContainer: byId('statsContainer'),
-  planList: byId('planList'), regenPlanBtn: byId('regenPlanBtn'),
+  planList: byId('planList'), regenPlanBtn: byId('regenPlanBtn'), savePlanBtn: byId('savePlanBtn'),
+  currentMonthKm: byId('currentMonthKm'), targetMonthKm: byId('targetMonthKm'), weeklyIncreaseRate: byId('weeklyIncreaseRate'), cutbackEvery: byId('cutbackEvery'),
+  weeklyPlanBody: byId('weeklyPlanBody'), planProgress: byId('planProgress'),
   exportJsonBtn: byId('exportJsonBtn'), importJsonInput: byId('importJsonInput'), exportCsvBtn: byId('exportCsvBtn'), resetStorageBtn: byId('resetStorageBtn'),
   globalMessage: byId('globalMessage'),
   debugToggle: byId('debugToggle'), debugPanel: byId('debugPanel'), roiCanvas: byId('roiCanvas'),
   pipelineThumbs: byId('pipelineThumbs'), debugCandidates: byId('debugCandidates'), candidatePanel: byId('candidatePanel'),
+  insertTemplateBtn: byId('insertTemplateBtn'), injectSample1Btn: byId('injectSample1Btn'), injectSample2Btn: byId('injectSample2Btn'), injectSample3Btn: byId('injectSample3Btn'),
+  mainMenu: byId('mainMenu')
   insertTemplateBtn: byId('insertTemplateBtn'), injectSample1Btn: byId('injectSample1Btn'), injectSample2Btn: byId('injectSample2Btn'), injectSample3Btn: byId('injectSample3Btn')
 };
 
@@ -65,6 +73,7 @@ init();
 
 function init() {
   if (!data.plan.length) data.plan = generateMonthlyPlan();
+  ensureTrainingPlan();
   initOpenCV();
   bindEvents();
   renderAll();
@@ -92,6 +101,7 @@ function bindEvents() {
   els.debugToggle.addEventListener('change', () => {
     els.debugPanel.classList.toggle('hidden', !els.debugToggle.checked);
   });
+  bindMainMenu();
   els.insertTemplateBtn.addEventListener('click', insertCorrectionTemplate);
   [els.injectSample1Btn, els.injectSample2Btn, els.injectSample3Btn].forEach((btn, idx) => {
     btn.addEventListener('click', () => {
@@ -100,6 +110,9 @@ function bindEvents() {
     });
   });
 
+  els.regenPlanBtn.addEventListener('click', generateAutoMileagePlanFromInput);
+  els.savePlanBtn?.addEventListener('click', () => {
+    persist('목표 월 마일리지 계획을 저장했습니다.');
   els.regenPlanBtn.addEventListener('click', () => {
     data.plan = generateMonthlyPlan();
     persist('월간 계획을 재생성했습니다.');
@@ -117,6 +130,24 @@ function bindEvents() {
       renderAll();
     }
   });
+}
+
+
+function bindMainMenu() {
+  if (!els.mainMenu) return;
+  const buttons = [...els.mainMenu.querySelectorAll('.menu-btn')];
+  buttons.forEach((btn) => {
+    btn.addEventListener('click', () => switchSection(btn.dataset.target));
+  });
+  switchSection('dashboardSection');
+}
+
+function switchSection(targetId) {
+  const sections = document.querySelectorAll('.page-section');
+  sections.forEach((section) => section.classList.toggle('hidden', section.id !== targetId));
+  if (els.mainMenu) {
+    [...els.mainMenu.querySelectorAll('.menu-btn')].forEach((btn) => btn.classList.toggle('active', btn.dataset.target === targetId));
+  }
 }
 
 async function handleOcr() {
@@ -148,6 +179,8 @@ async function handleOcr() {
     let done = 0;
     let best = null;
     for (const task of tasks) {
+      const rawCanvas = task.roi ? cropCanvas(task.version.canvas, task.roi) : task.version.canvas;
+      const roiCanvas = maskTopNoiseStrip(rawCanvas, OCR_CONFIG.topNoiseRatio);
       const roiCanvas = task.roi ? cropCanvas(task.version.canvas, task.roi) : task.version.canvas;
       const { text } = await runTesseractMulti(roiCanvas, (status, progress) => {
         if (status === 'recognizing text') {
@@ -200,6 +233,26 @@ async function runTesseractMulti(canvas, logger, psmSet = [6, 11]) {
   throw latestErr || new Error('모든 OCR 조합 실패');
 }
 
+async function runTesseractMulti(canvas, logger, psmSet = [6, 11]) {
+  const langs = ['eng+kor', 'eng'];
+  let latestErr = null;
+  for (const lang of langs) {
+    for (const psm of psmSet) {
+      try {
+        const { data: ocr } = await Tesseract.recognize(canvas, lang, {
+          logger,
+          tessedit_pageseg_mode: psm,
+          tessedit_char_whitelist: '0123456789:.,/kmKMbBpPcCaAlLhHrRtTiImMeE '
+        });
+        if ((ocr.text || '').trim()) return { text: ocr.text, lang, psm };
+      } catch (e) {
+        latestErr = e;
+      }
+    }
+  }
+  throw latestErr || new Error('모든 OCR 조합 실패');
+}
+
 function parseToForm(text, preParsed = null, meta = {}) {
   const parsed = preParsed || parseOCRText(text, { roiSource: meta.source || 'manual' });
   lastParseResult = parsed;
@@ -223,6 +276,7 @@ function parseToForm(text, preParsed = null, meta = {}) {
 
 function parseOCRText(text, context = {}) {
   const normalizedText = normalizeOcrText(text);
+  const lines = normalizedText.split('\n').map((line, idx) => ({ raw: line, idx, norm: normalizeLine(line), lineRatio: idx / Math.max(1, normalizedText.split('\n').length - 1) })).filter(l => l.norm);
   const lines = normalizedText.split('\n').map((line, idx) => ({ raw: line, idx, norm: normalizeLine(line) })).filter(l => l.norm);
   const labelIndexes = detectLabelIndexes(lines);
 
@@ -255,6 +309,323 @@ function normalizeOcrText(text = '') {
     .replace(/\r/g, '\n')
     .replace(/\n{2,}/g, '\n')
     .trim();
+}
+
+function normalizeLine(line = '') {
+  let t = line.toLowerCase().trim();
+  t = t.replace(/(k\s*[.,]?\s*m)/g, 'km');
+  t = t.replace(/(b\s*[.,]?\s*p\s*[.,]?\s*m)/g, 'bpm');
+  t = t.replace(/(k\s*[.,]?\s*c\s*[.,]?\s*a\s*[.,]?\s*l)/g, 'kcal');
+  t = t.replace(/\/\s*k\s*m/g, '/km');
+  t = t.replace(/(\d),(\d)/g, '$1.$2');
+  t = t.replace(/([0-9])\s*[·•]\s*([0-9])/g, '$1.$2');
+  t = t.replace(/[|]/g, '1');
+  return t;
+}
+
+function fixNumericToken(token, allowDecimal = false) {
+  const map = { o: '0', O: '0', l: '1', I: '1', s: '5', S: '5', b: '6', B: '8' };
+  const chars = token.split('').map((c) => map[c] ?? c);
+  const keep = allowDecimal ? /[0-9.]/ : /[0-9]/;
+  return chars.filter((c) => keep.test(c)).join('');
+}
+
+function detectLabelIndexes(lines) {
+  const dictionary = {
+    distance: ['거리', 'dist', 'distance'],
+    duration: ['총 시간', 'duration', 'time', '시간'],
+    pace: ['평균 페이스', 'pace'],
+    avgHr: ['평균 심박', '심박수', 'hr', 'heart'],
+    calories: ['총 칼로리', '칼로리', 'kcal', 'calories']
+  };
+  const out = {};
+  for (const [field, words] of Object.entries(dictionary)) {
+    out[field] = [];
+    for (const line of lines) {
+      const score = Math.max(...words.map(w => similarity(line.norm, w)));
+      if (score >= 0.62) out[field].push({ idx: line.idx, score });
+    }
+  }
+  return out;
+}
+
+function labelProximityScore(lineIdx, labels) {
+  if (!labels?.length) return 0;
+  const distance = Math.min(...labels.map(l => Math.abs(l.idx - lineIdx)));
+  const closeness = Math.max(0, 1 - distance / 4);
+  const labelStrength = Math.max(...labels.map(l => l.score));
+  return closeness * 30 + labelStrength * 20;
+}
+
+function collectDistanceCandidates(lines, labelIndexes, context) {
+  const out = [];
+  const add = (value, line, reason, base = 40) => {
+    if (!value || value < 0.5 || value > 60) return;
+    let score = base + labelProximityScore(line.idx, labelIndexes.distance);
+    score += context.roi ? 8 : 0;
+    if (line.idx / Math.max(1, lines.length) < 0.2) score -= 8;
+    out.push({ value: Number(value.toFixed(2)), score, reason, line: line.raw });
+  };
+
+  for (const line of lines) {
+    const kmMatch = line.norm.match(/(\d{1,3}(?:\.\d{1,3})?)\s*km\b/);
+    if (kmMatch) add(Number(kmMatch[1]), line, 'km 패턴');
+
+    const rawNums = line.norm.match(/\b\d{3,5}\b/g) || [];
+    for (const raw of rawNums) {
+      if (!/dist|거리|km/.test(line.norm)) continue;
+      const variants = [
+        Number(`${raw.slice(0, raw.length - 2)}.${raw.slice(-2)}`),
+        raw.length >= 4 ? Number(`${raw.slice(0, raw.length - 1)}.${raw.slice(-1)}`) : null
+      ].filter(Boolean);
+      variants.forEach((decimal, idx) => add(decimal, line, idx === 0 ? '소수점 복원(2자리)' : '소수점 복원(1자리)', 30 - idx * 4));
+    }
+  }
+  return dedupeCandidates(out);
+}
+
+function collectDurationCandidates(lines, labelIndexes, context) {
+  const out = [];
+  const add = (value, line, reason, base = 45) => {
+    if (!value) return;
+    let score = base + labelProximityScore(line.idx, labelIndexes.duration);
+    const sec = durationToSec(value);
+    if (sec < 120 || sec > 8 * 3600) score -= 35;
+    const isTop = line.idx / Math.max(1, lines.length) < 0.25;
+    const likelyClock = /^(2[0-3]|1\d):[0-5]\d$/.test(value);
+    if (likelyClock && !/duration|총 시간|time|시간/.test(line.norm)) score -= 100;
+    if (isTop) score -= 35;
+    if (/lte|5g|배터리|battery|상태바/.test(line.norm)) score -= 120;
+    if (context.roiSource === 'full_fallback') score -= 4;
+    out.push({ value, score, reason, line: line.raw, sec });
+  };
+
+  for (const line of lines) {
+    const matches = line.norm.match(/\b(\d{1,2}:\d{2}(?::\d{2})?)\b/g) || [];
+    for (const m of matches) add(normalizeDuration(m), line, '시간 패턴');
+  }
+  return dedupeCandidates(out);
+}
+
+function collectPaceCandidates(lines, labelIndexes, context) {
+  const out = [];
+  const add = (value, line, reason, base = 46) => {
+    if (!value) return;
+    const sec = paceToSec(value);
+    if (sec < 180 || sec > 750) return;
+    let score = base + labelProximityScore(line.idx, labelIndexes.pace);
+    if (/\/km|pace|페이스/.test(line.norm)) score += 8;
+    if (context.roi) score += 4;
+    out.push({ value, score, reason, line: line.raw, sec });
+  };
+
+  for (const line of lines) {
+    const p1 = line.norm.match(/(\d{1,2})[:'"`](\d{2})\s*\/\s*km/);
+    if (p1) add(`${Number(p1[1])}:${p1[2]}`, line, '페이스 단위 패턴');
+    const p2 = line.norm.match(/\b(\d{1,2}:\d{2})\b/);
+    if (p2 && /pace|페이스|\/km/.test(line.norm)) add(p2[1], line, '페이스 근접 패턴', 38);
+  }
+  return dedupeCandidates(out);
+}
+
+function collectHrCandidates(lines, labelIndexes, context) {
+  const out = [];
+  const add = (value, line, reason, base = 40) => {
+    if (!value || value < 60 || value > 220) return;
+    let score = base + labelProximityScore(line.idx, labelIndexes.avgHr);
+    if (/bpm|hr|heart|심박/.test(line.norm)) score += 8;
+    if (context.roi) score += 3;
+    out.push({ value: Math.round(value), score, reason, line: line.raw });
+  };
+
+  for (const line of lines) {
+    const m1 = line.norm.match(/\b(\d{2,3})\s*bpm\b/);
+    if (m1) add(Number(m1[1]), line, 'bpm 패턴');
+    if (/hr|heart|심박/.test(line.norm)) {
+      const m2 = line.norm.match(/\b(\d{2,3})\b/);
+      if (m2) add(Number(fixNumericToken(m2[1])), line, '라벨 근접 심박', 32);
+    }
+  }
+  return dedupeCandidates(out);
+}
+
+function collectCalorieCandidates(lines, labelIndexes, context) {
+  const out = [];
+  const add = (value, line, reason, base = 40) => {
+    if (!value || value < 30 || value > 5000) return;
+    let score = base + labelProximityScore(line.idx, labelIndexes.calories);
+    if (/kcal|calorie|칼로리/.test(line.norm)) score += 7;
+    if (context.roi) score += 3;
+    out.push({ value: Math.round(value), score, reason, line: line.raw });
+  };
+
+  for (const line of lines) {
+    const m1 = line.norm.match(/\b(\d{2,4})\s*kcal\b/);
+    if (m1) add(Number(fixNumericToken(m1[1])), line, 'kcal 패턴');
+    if (/calorie|칼로리/.test(line.norm)) {
+      const m2 = line.norm.match(/\b(\d{2,4})\b/);
+      if (m2) add(Number(fixNumericToken(m2[1])), line, '라벨 근접 칼로리', 30);
+    }
+  }
+  return dedupeCandidates(out);
+}
+
+function chooseBestCombination(candidates) {
+  const distanceList = candidates.distance.length ? candidates.distance : [{ value: null, score: -10 }];
+  const durationList = candidates.duration.length ? candidates.duration : [{ value: null, score: -10 }];
+  const paceList = candidates.pace.length ? candidates.pace : [{ value: null, score: -8 }];
+
+  let best = {
+    totalScore: -Infinity,
+    values: { distance: null, duration: null, pace: null, avgHr: null, calories: null },
+    reasons: []
+  };
+
+  for (const d of distanceList.slice(0, 5)) {
+    for (const t of durationList.slice(0, 5)) {
+      for (const paceCandidate of paceList.slice(0, 5)) {
+        let chosenPace = paceCandidate;
+        let score = d.score + t.score + paceCandidate.score;
+        const reasons = [`거리:${d.value ?? '-'}(${Math.round(d.score)})`, `시간:${t.value ?? '-'}(${Math.round(t.score)})`, `페이스:${paceCandidate.value ?? '-'}(${Math.round(paceCandidate.score)})`];
+        let calcPace = null;
+        if (d.value && t.value) {
+          calcPace = durationToSec(t.value) / d.value;
+          if (calcPace >= 180 && calcPace <= 750) score += 20;
+        }
+        if (chosenPace.value && calcPace) {
+          const delta = Math.abs(paceToSec(chosenPace.value) - calcPace);
+          score += Math.max(-20, 32 - delta / 2);
+          reasons.push(`페이스 일관성 보정 Δ${Math.round(delta)}초`);
+        } else if (calcPace) {
+          chosenPace = { ...chosenPace, value: secToPace(calcPace).replace(' /km', '') };
+          score += 8;
+          reasons.push('계산 페이스 보완');
+        }
+
+        const hrBest = candidates.avgHr[0] || { value: null, score: 0 };
+        const calBest = candidates.calories[0] || { value: null, score: 0 };
+        score += hrBest.score + calBest.score;
+
+        if (score > best.totalScore) {
+          best = {
+            totalScore: score,
+            values: {
+              distance: d.value,
+              duration: t.value,
+              pace: chosenPace.value,
+              avgHr: hrBest.value,
+              calories: calBest.value
+            },
+            reasons
+          };
+        }
+      }
+    }
+  }
+  return best;
+}
+
+function dedupeCandidates(list) {
+  const map = new Map();
+  for (const c of list) {
+    const key = String(c.value);
+    if (!map.has(key) || map.get(key).score < c.score) map.set(key, c);
+  }
+  return [...map.values()].sort((a, b) => b.score - a.score);
+}
+
+function similarity(a, b) {
+  const dist = levenshtein(a, b);
+  return 1 - dist / Math.max(a.length, b.length, 1);
+}
+
+function levenshtein(a = '', b = '') {
+  const dp = Array.from({ length: a.length + 1 }, (_, i) => [i]);
+  for (let j = 1; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+    }
+  }
+  return dp[a.length][b.length];
+}
+
+function normalizeDuration(v) {
+  const parts = v.split(':').map((p) => p.padStart(2, '0'));
+  if (parts.length === 2) return `${parts[0]}:${parts[1]}`;
+  return `${parts[0]}:${parts[1]}:${parts[2]}`;
+}
+
+function paceToSec(v) {
+  if (!v) return 0;
+  const [m, s] = v.split(':').map(Number);
+  return m * 60 + s;
+}
+
+function insertCorrectionTemplate() {
+  const tpl = `거리 __ km\n총 시간 __\n평균 페이스 __ /km\n평균 심박 __ bpm\n총 칼로리 __ kcal`;
+  els.ocrText.value = `${els.ocrText.value.trim()}\n\n${tpl}`.trim();
+}
+
+function renderCandidateSelectors(parsed) {
+  const fields = [
+    { key: 'distance', label: '거리 후보 (km)', format: (v) => v },
+    { key: 'duration', label: '시간 후보', format: (v) => v },
+    { key: 'pace', label: '페이스 후보', format: (v) => `${v} /km` },
+    { key: 'avgHr', label: '평균 심박 후보', format: (v) => `${v} bpm` },
+    { key: 'calories', label: '칼로리 후보', format: (v) => `${v} kcal` }
+  ];
+
+  els.candidatePanel.innerHTML = '';
+  for (const f of fields) {
+    const list = parsed.candidates[f.key] || [];
+    if (!list.length) continue;
+    const wrapper = document.createElement('label');
+    wrapper.textContent = f.label;
+    const select = document.createElement('select');
+    list.slice(0, 6).forEach((c, idx) => {
+      const op = document.createElement('option');
+      op.value = c.value;
+      op.textContent = `${f.format(c.value)} (점수 ${Math.round(c.score)})`;
+      if (idx === 0) op.selected = true;
+      select.appendChild(op);
+    });
+    select.addEventListener('change', () => applyCandidateChoice(f.key, select.value));
+    wrapper.appendChild(select);
+    els.candidatePanel.appendChild(wrapper);
+  }
+}
+
+function applyCandidateChoice(field, value) {
+  if (field === 'distance') els.distance.value = value;
+  if (field === 'duration') els.duration.value = value;
+  if (field === 'avgHr') els.avgHr.value = value;
+  if (field === 'calories') els.calories.value = value;
+}
+
+function renderDebugCandidates(parsed) {
+  if (!els.debugToggle.checked) return;
+  const sections = Object.entries(parsed.candidates).map(([k, list]) => {
+    const rows = list.slice(0, 5).map((c) => `<li>${c.value} · ${Math.round(c.score)}점 · ${escapeHtml(c.reason || '')} · ${escapeHtml(c.line || '')}</li>`).join('');
+    return `<h4>${k}</h4><ol>${rows || '<li>후보 없음</li>'}</ol>`;
+  }).join('');
+  els.debugCandidates.innerHTML = `<div><strong>선택 이유</strong><div>${parsed.reasons.join(' / ')}</div></div>${sections}`;
+}
+
+
+function maskTopNoiseStrip(canvas, ratio = 0.18) {
+  const copy = document.createElement('canvas');
+  copy.width = canvas.width;
+  copy.height = canvas.height;
+  const ctx = copy.getContext('2d');
+  ctx.drawImage(canvas, 0, 0);
+  const h = Math.max(24, Math.floor(copy.height * ratio));
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, copy.width, h);
+  return copy;
+}
+
 }
 
 function normalizeLine(line = '') {
@@ -636,6 +1007,7 @@ function detectRois(canvas) {
     if (area < imgArea * 0.06) continue;
     if (rect.width < canvas.width * 0.45) continue;
     if (yRatio < OCR_CONFIG.topTabRatio) continue;
+    if (rect.y + rect.height < canvas.height * 0.42) continue;
     let score = area / imgArea * 100;
     if (rect.y > canvas.height * OCR_CONFIG.lowerRoiStart) score += 20;
     candidates.push({ x: rect.x, y: rect.y, width: rect.width, height: rect.height, score });
@@ -859,6 +1231,100 @@ function generateMonthlyPlan(baseDate = new Date()) {
   return plan;
 }
 
+
+function ensureTrainingPlan() {
+  if (data.trainingPlan?.weeks?.length) {
+    fillTrainingPlanInputs(data.trainingPlan.settings);
+    return;
+  }
+  const monthEntries = data.entries.filter(e => isCurrentMonth(e.date));
+  const currentKm = Number(sum(monthEntries.map(e => e.distance)).toFixed(1)) || 80;
+  const targetKm = Number((currentKm * 1.08).toFixed(1));
+  data.trainingPlan = buildMileagePlan({ currentMonthKm: currentKm, targetMonthKm: targetKm, increaseRate: 7, cutbackEvery: 3 });
+  fillTrainingPlanInputs(data.trainingPlan.settings);
+}
+
+function fillTrainingPlanInputs(settings) {
+  if (!settings) return;
+  if (els.currentMonthKm) els.currentMonthKm.value = settings.currentMonthKm;
+  if (els.targetMonthKm) els.targetMonthKm.value = settings.targetMonthKm;
+  if (els.weeklyIncreaseRate) els.weeklyIncreaseRate.value = settings.increaseRate;
+  if (els.cutbackEvery) els.cutbackEvery.value = settings.cutbackEvery;
+}
+
+function generateAutoMileagePlanFromInput() {
+  const currentMonthKm = Number(els.currentMonthKm?.value);
+  const targetMonthKm = Number(els.targetMonthKm?.value);
+  const increaseRate = Number(els.weeklyIncreaseRate?.value || 7);
+  const cutbackEvery = Number(els.cutbackEvery?.value || 3);
+  if (!currentMonthKm || !targetMonthKm || targetMonthKm < currentMonthKm * 0.9) {
+    return showMsg('현재/목표 월 거리 값을 확인하세요. 목표는 현재 대비 지나치게 낮을 수 없습니다.', true);
+  }
+  data.trainingPlan = buildMileagePlan({ currentMonthKm, targetMonthKm, increaseRate, cutbackEvery });
+  persist('목표 월 마일리지 계획을 생성했습니다.');
+  renderPlan();
+}
+
+function buildMileagePlan({ currentMonthKm, targetMonthKm, increaseRate, cutbackEvery }) {
+  const today = new Date();
+  const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+  const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+  const weekStarts = [];
+  for (let d = new Date(monthStart); d <= monthEnd; d.setDate(d.getDate() + 7)) weekStarts.push(new Date(d));
+  const weekCount = weekStarts.length;
+
+  let weekly = currentMonthKm / weekCount;
+  const targetWeeklyAvg = targetMonthKm / weekCount;
+  const weeks = [];
+  for (let i = 0; i < weekCount; i++) {
+    const weekNo = i + 1;
+    const isCutback = weekNo > 1 && weekNo % cutbackEvery === 0;
+    if (isCutback) weekly *= 0.82;
+    else if (weekNo > 1) weekly *= (1 + increaseRate / 100);
+    weekly = Math.min(weekly, targetWeeklyAvg * 1.25);
+    weeks.push({
+      weekNo,
+      startDate: toDateInputValue(weekStarts[i]),
+      endDate: toDateInputValue(new Date(weekStarts[i].getFullYear(), weekStarts[i].getMonth(), weekStarts[i].getDate() + 6)),
+      targetKm: Number(weekly.toFixed(1)),
+      isCutback
+    });
+  }
+
+  const scale = targetMonthKm / Math.max(1, sum(weeks.map(w => w.targetKm)));
+  weeks.forEach((w) => {
+    w.targetKm = Number((w.targetKm * scale).toFixed(1));
+    w.structure = createWeeklyStructure(w.targetKm, w.isCutback);
+  });
+
+  return {
+    settings: { currentMonthKm, targetMonthKm, increaseRate, cutbackEvery },
+    weeks,
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function createWeeklyStructure(weeklyKm, isCutback) {
+  const highIntensity = Number((weeklyKm * 0.18).toFixed(1));
+  const longRun = Number(Math.min(weeklyKm * 0.30, weeklyKm * (isCutback ? 0.24 : 0.28)).toFixed(1));
+  const recovery = Number((weeklyKm * 0.12).toFixed(1));
+  const zone2 = Number(Math.max(weeklyKm - highIntensity - longRun - recovery, 0).toFixed(1));
+  return {
+    zone2,
+    highIntensity,
+    longRun,
+    recovery,
+    text: `존2 ${zone2}km · 고강도 ${highIntensity}km · 롱런 ${longRun}km · 회복 ${recovery}km`
+  };
+}
+
+function calculateWeeklyActualKm(startDate, endDate) {
+  return Number(sum(data.entries
+    .filter((e) => e.date >= startDate && e.date <= endDate)
+    .map((e) => e.distance)).toFixed(1));
+}
+
+
 function renderAll() {
   recalculateAllEntries();
   renderSummary();
@@ -967,23 +1433,49 @@ function buildSummaryText(s) {
 }
 
 function renderPlan() {
+  if (!data.trainingPlan) ensureTrainingPlan();
+  fillTrainingPlanInputs(data.trainingPlan?.settings);
+
+  const weeks = data.trainingPlan?.weeks || [];
+  let totalTarget = 0;
+  let totalActual = 0;
+  if (els.weeklyPlanBody) els.weeklyPlanBody.innerHTML = '';
+
+  weeks.forEach((w) => {
+    const actualKm = calculateWeeklyActualKm(w.startDate, w.endDate);
+    const progress = w.targetKm ? Math.min(160, (actualKm / w.targetKm) * 100) : 0;
+    totalTarget += w.targetKm;
+    totalActual += actualKm;
+
+    if (els.weeklyPlanBody) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${w.weekNo}주${w.isCutback ? ' (컷백)' : ''}</td>
+        <td>${w.startDate} ~ ${w.endDate}</td>
+        <td>${w.targetKm.toFixed(1)} km</td>
+        <td>${actualKm.toFixed(1)} km</td>
+        <td>${progress.toFixed(0)}%
+          <div class="progress-meter"><span style="width:${Math.min(progress, 100)}%"></span></div>
+        </td>
+        <td>
+          <span class="plan-chip">존2 ${w.structure.zone2}</span>
+          <span class="plan-chip hard">고강도 ${w.structure.highIntensity}</span>
+          <span class="plan-chip">롱런 ${w.structure.longRun}</span>
+          <span class="plan-chip">회복 ${w.structure.recovery}</span>
+        </td>`;
+      els.weeklyPlanBody.appendChild(tr);
+    }
+  });
+
+  const monthProgress = totalTarget ? (totalActual / totalTarget) * 100 : 0;
+  if (els.planProgress) {
+    els.planProgress.innerHTML = `월간 목표 ${totalTarget.toFixed(1)}km / 실제 ${totalActual.toFixed(1)}km · 진행률 ${monthProgress.toFixed(1)}%`;
+  }
+
   els.planList.innerHTML = '';
-  const mapByDate = Object.fromEntries(data.entries.map(e => [e.date, e.id]));
-  data.plan.forEach(p => {
-    if (mapByDate[p.date]) { p.done = true; p.linkedEntryId = mapByDate[p.date]; }
+  weeks.forEach((w) => {
     const row = document.createElement('div');
-    row.className = `plan-item ${p.done ? 'done' : ''}`;
-    row.innerHTML = `<div><strong>${p.date}</strong> · ${p.text}<div class="small">${p.linkedEntryId ? '기록과 연결됨' : '미연결'}</div></div>`;
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.checked = p.done;
-    cb.addEventListener('change', () => {
-      p.done = cb.checked;
-      persist('계획 완료 체크 업데이트');
-      renderStats();
-      renderPlan();
-    });
-    row.appendChild(cb);
+    row.className = `plan-item ${w.isCutback ? 'done' : ''}`;
+    row.innerHTML = `<div><strong>${w.weekNo}주차</strong> · ${w.structure.text}<div class="small">고강도 ≤ 20%, 롱런 ≤ 30%, 존2 중심</div></div>`;
     els.planList.appendChild(row);
   });
 }
@@ -1004,8 +1496,10 @@ function importJSON(e) {
       data = {
         ...structuredClone(defaultData),
         ...parsed,
-        plan: Array.isArray(parsed.plan) ? parsed.plan : generateMonthlyPlan()
+        plan: Array.isArray(parsed.plan) ? parsed.plan : generateMonthlyPlan(),
+        trainingPlan: parsed.trainingPlan || null
       };
+      ensureTrainingPlan();
       persist('JSON 가져오기 완료');
       renderAll();
     } catch (err) {
