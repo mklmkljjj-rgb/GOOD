@@ -68,6 +68,9 @@ button {
 }
 button:hover { filter: brightness(1.1); transform: translateY(-1px); }
 button.danger { background: linear-gradient(135deg, #f43f5e, #ef4444); }
+button { cursor: pointer; background: #1d4ed8; border: none; width: auto; }
+button:hover { filter: brightness(1.1); }
+button.danger { background: #b91c1c; }
 .toolbar {
   display: flex;
   flex-wrap: wrap;
